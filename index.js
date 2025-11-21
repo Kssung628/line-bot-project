@@ -156,12 +156,16 @@ async function handleEvent(event) {
     });
   }
 
-  // 萬一流程亂掉
+   // 萬一流程亂掉
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: "流程已重置，請輸入「我是保險經紀人」重新開始。"
   });
 }
+
+app.get("/", (req, res) => {
+  res.status(200).send("OK");
+});
 
 const PORT = process.env.PORT || 3000;
 
