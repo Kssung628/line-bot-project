@@ -1,3 +1,4 @@
+
 import "dotenv/config";
 import express from "express";
 import line from "@line/bot-sdk";
@@ -150,7 +151,7 @@ async function handleEvent(event) {
       age: state.age,
       gender: state.gender,
       occupation: state.occupation,
-      // 可再擴充：這裡先用預設數值
+      // 這裡先預設，之後可在流程中多問問題
       income: 600000,
       debt: 0,
       childCost: 0,
@@ -177,8 +178,7 @@ async function handleEvent(event) {
       } else if (parsed.type === "pdf") {
         const { text: pdfText, cashValues } = await extractFromPdf(parsed.raw);
         title = "PDF 保單（名稱可改由手動輸入）";
-        coverage = []; // 如需更精細，可從 pdfText 再做字串分析
-
+        coverage = [];
         if (cashValues && cashValues.length > 0 && state.type === "財富型") {
           const annualPremium = state.budget * 12;
           irrValue = calcIRR(cashValues, annualPremium);
@@ -186,7 +186,6 @@ async function handleEvent(event) {
       }
 
       const gap = analyzeGap(profile, coverage);
-
       await saveUserProfile(userId, {
         profile,
         productLink: state.productLink,
