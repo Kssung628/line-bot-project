@@ -21,7 +21,7 @@ export async function getSmartReply(userId, message) {
   const history = db[userId].slice(-20);
   const messages = [
     { role: "system", content: "你是專業的保險顧問 AI，回答自然且記得上下文。" },
-    *history,
+    ...history,
   ];
 
   const resp = await client.chat.completions.create({
