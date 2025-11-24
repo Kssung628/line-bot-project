@@ -1,10 +1,7 @@
+
 import "dotenv/config";
 import express from "express";
 import line from "@line/bot-sdk";
-import fs from "fs";
-import path from "path";
-import OpenAI from "openai";
-import { fileURLToPath } from "url";
 
 import { parseInsuranceProduct } from "./services/policy_parser.js";
 import { extractFromPdf } from "./services/pdf_reader.js";
@@ -19,82 +16,16 @@ const config = {
 };
 
 const app = express();
+// ❌ 錯誤：這會導致 body 被解析為物件
+// app.use(express.json());
 
-const client = new line.Client(config);
-const openai = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  : null;
-
-// 取得 __dirname（因為是 ES module）
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// 對話紀錄檔案
-const convoPath = path.join(__dirname, "data", "conversations.json");
-
-function loadConvos() {
-  try {
-    if (!fs.existsSync(convoPath)) {
-      return {};
-    }
-    const raw = fs.readFileSync(convoPath, "utf-8");
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) {
-    console.error("loadConvos error:", e);
-    return {};
-  }
-}
-
-function saveConvos(db) {
-  try {
-    fs.writeFileSync(convoPath, JSON.stringify(db, null, 2), "utf-8");
-  } catch (e) {
-    console.error("saveConvos error:", e);
-  }
-}
-
-async function getSmartReply(userId, message) {
-  if (!openai) {
-    return "目前尚未設定 OpenAI API Key，所以僅能回覆簡單訊息：\n" + message;
-  }
-  const db = loadConvos();
-  if (!db[userId]) db[userId] = [];
-
-  db[userId].push({ role: "user", content: message });
-
-  const history = db[userId].slice(-20);
-  const messages = [
-    {
-      role: "system",
-      content:
-        "你是一位協助保險經紀人的智慧助理，使用繁體中文回答，語氣專業且自然，記得上下文。"
-    },
-    ...history,
-  ];
-
-  const resp = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages,
-  });
-
-  const reply = resp.choices[0].message.content;
-  db[userId].push({ role: "assistant", content: reply });
-  saveConvos(db);
-  return reply;
-}
-
-// 簡易流程記憶：正式可改用 Redis / DB
-const userState = {};
-
-// Webhook：必須使用 raw body 給 LINE middleware 驗簽
-app.post(
-  "/callback",
-  express.raw({ type: "application/json" }),
-  line.middleware(config),
+// ✅ 正確：LINE middleware 需要原始 body
+app.post("/callback", 
+  express.raw({ type: 'application/json' }),  // 保留原始 body
+  line.middleware(config), 
   async (req, res) => {
     try {
-      const events = req.body.events || [];
-      await Promise.all(events.map(handleEvent));
+      await Promise.all(req.body.events.map(handleEvent));
       return res.json({ status: "ok" });
     } catch (e) {
       console.error("handleEvent error:", e);
@@ -103,94 +34,228 @@ app.post(
   }
 );
 
-// 其他路由再掛 JSON parser
+// 其他路由可以使用 JSON parser
 app.use(express.json());
 
 app.get("/", (req, res) => {
   res.status(200).send("OK");
 });
 
+
+const client = new line.Client(config);
+
+// 簡易記憶：正式可改 Redis 或 DB
+const userState = {};
+
+app.post("/callback", line.middleware(config), async (req, res) => {
+  try {
+    await Promise.all(req.body.events.map(handleEvent));
+    return res.json({ status: "ok" });
+  } catch (e) {
+    console.error("handleEvent error:", e);
+    return res.status(500).end();
+  }
+});
+
 async function handleEvent(event) {
-  if (event.type !== "message") return;
+  if (event.type !== "message" || event.message.type !== "text") return;
 
+  const text = event.message.text.trim();
   const userId = event.source.userId;
-  const msg = event.message;
 
-  // ✅ A. 處理使用者直接上傳的 PDF 檔案
-  if (msg.type === "file" && msg.fileName.toLowerCase().endsWith(".pdf")) {
-    // 先把 LINE 的檔案抓下來
-    const stream = await client.getMessageContent(msg.id);
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
-    const buffer = Buffer.concat(chunks);
-
-    // 用你現有的 pdf_reader 解析
-    const { text, cashValues } = await extractFromPdf(buffer);
-
-    // 若這時候剛好在 Step 6，就順便帶入 profile 資料
-    const state = userState[userId];
-    let profile = {};
-    if (state && state.step === 6) {
-      profile = {
-        type: state.type,
-        budget: state.budget,
-        age: state.age,
-        gender: state.gender,
-        occupation: state.occupation,
-        income: 600000,
-        debt: 0,
-        childCost: 0,
-      };
-    }
-
-    let irrValue = null;
-    if (
-      cashValues &&
-      cashValues.length > 0 &&
-      profile.type === "財富型" &&
-      profile.budget
-    ) {
-      irrValue = calcIRR(cashValues, profile.budget * 12);
-    }
-
-    // 這邊先用通用的 AI 回覆（conversationService），
-    // 請 AI 根據 PDF 內容給出保單整理 + 規劃建議
-    const aiReply = await getSmartReply(
-      userId,
-      `以下是客戶提供的保單 PDF 文字內容，請幫我：
-1) 條列保單主要保障項目與保額
-2) 檢視保障是否足夠，指出主要保障缺口
-3) 給我可以對客戶說明的建議話術（約 3~5 句）
-
-保單內容如下：
-${text}`
-    );
-
+  // 啟動保險規劃流程
+  if (text.includes("保險經紀人") || text.includes("保險業務員")) {
+    userState[userId] = { step: 1 };
     return client.replyMessage(event.replyToken, {
       type: "text",
-      text: aiReply,
+      text:
+        "您好，我將協助您進行專業保單規劃。\n" +
+        "請問您想規劃的保單類型是：\n" +
+        "1️⃣ 財富型\n2️⃣ 保障型\n3️⃣ 醫療型",
     });
   }
 
-  // ✅ B. 其他非文字訊息（圖片、貼圖等等）就先忽略
-  if (msg.type !== "text") return;
+  // 若未在流程中
+  if (!userState[userId]) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "請先輸入「我是保險經紀人」以啟動智能保單規劃助手。",
+    });
+  }
 
-  // ✅ C. 原本的文字流程：保險規劃 Step 1~6 + fallback
-  const text = msg.text.trim();
+  const state = userState[userId];
 
-  // 以下保留你原本的程式內容：
-  // 1) 啟動流程：「我是保險經紀人」、「保險業務員」
-  // 2) Step 1~5 問保單類型/預算/年齡/性別/職業等級
-  // 3) Step 6 貼網址 → 解析 + IRR + 缺口 + 話術
-  // 4) 流程外的對話 → getSmartReply Fallback
+  // Step 1：保單類型
+  if (state.step === 1) {
+    if (["財富型", "保障型", "醫療型"].includes(text)) {
+      state.type = text;
+      state.step = 2;
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text:
+          `了解！客戶需求：${text}\n` +
+          "請問每月可負擔的保費預算大約是多少？（例如：3000）",
+      });
+    }
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "請回答：財富型 / 保障型 / 醫療型",
+    });
+  }
 
-  // 👉 這裡開始貼回你原本 handleEvent 裡處理文字的那一大段邏輯
-  // （從「// 啟動保險規劃流程」一直到最後 AI fallback 那段）
+  // Step 2：預算
+  if (state.step === 2) {
+    if (!isNaN(text)) {
+      state.budget = parseInt(text, 10);
+      state.step = 3;
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "請提供客戶保險年齡（例如：30）",
+      });
+    }
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "請輸入數字，例如：3000",
+    });
+  }
+
+  // Step 3：年齡
+  if (state.step === 3) {
+    if (!isNaN(text)) {
+      state.age = parseInt(text, 10);
+      state.step = 4;
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "請問客戶性別？（男 / 女）",
+      });
+    }
+    return;
+  }
+
+  // Step 4：性別
+  if (state.step === 4) {
+    if (["男", "女"].includes(text)) {
+      state.gender = text;
+      state.step = 5;
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "請問職業等級？（1~4）",
+      });
+    }
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "請回答 男 / 女",
+    });
+  }
+
+  // Step 5：職業等級
+  if (state.step === 5) {
+    const n = parseInt(text, 10);
+    if (!isNaN(n) && n >= 1 && n <= 4) {
+      state.occupation = n;
+      state.step = 6;
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text:
+          "最後一步：請貼上可銷售保單的產品頁連結（HTML 或 PDF），我會協助解析與規劃建議。",
+      });
+    }
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "請輸入 1~4 之間的數字（職業等級）",
+    });
+  }
+
+  // Step 6：解析保單連結 + IRR + 缺口 + 話術
+  if (state.step === 6) {
+    state.productLink = text;
+    const profile = {
+      type: state.type,
+      budget: state.budget,
+      age: state.age,
+      gender: state.gender,
+      occupation: state.occupation,
+      // 這裡先預設，之後可在流程中多問問題
+      income: 600000,
+      debt: 0,
+      childCost: 0,
+    };
+
+    try {
+      const parsed = await parseInsuranceProduct(text);
+      let title = "";
+      let coverage = [];
+      let irrValue = null;
+
+      if (!parsed.ok) {
+        await client.replyMessage(event.replyToken, {
+          type: "text",
+          text: "保單連結解析失敗，請確認網址是否正確或改貼文字條款。",
+        });
+        state.step = 0;
+        return;
+      }
+
+      if (parsed.type === "html") {
+        title = parsed.title || "未取得產品名稱";
+        coverage = parsed.coverage || [];
+      } else if (parsed.type === "pdf") {
+        const { text: pdfText, cashValues } = await extractFromPdf(parsed.raw);
+        title = "PDF 保單（名稱可改由手動輸入）";
+        coverage = [];
+        if (cashValues && cashValues.length > 0 && state.type === "財富型") {
+          const annualPremium = state.budget * 12;
+          irrValue = calcIRR(cashValues, annualPremium);
+        }
+      }
+
+      const gap = analyzeGap(profile, coverage);
+      await saveUserProfile(userId, {
+        profile,
+        productLink: state.productLink,
+        productTitle: title,
+        gap,
+        irr: irrValue,
+      });
+
+      const script = await buildSalesScript(profile, gap, title, irrValue);
+
+      state.step = 0;
+
+      const summaryText =
+        `✅ 保單解析完成：${title}\n` +
+        (irrValue
+          ? `估算 IRR 約為 ${(irrValue * 100).toFixed(2)}%（假設以年繳 ${state.budget * 12} 元、繳至現金價值表末年）\n`
+          : "") +
+        `我幫你整理了一份可用於向客戶說明的話術草稿：\n\n${script}`;
+
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: summaryText,
+      });
+    } catch (e) {
+      console.error("analysis error:", e);
+      state.step = 0;
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "保單解析或分析時發生錯誤，請稍後重試或改貼文字內容。",
+      });
+    }
+  }
+
+  // 流程意外狀況：重置
+  userState[userId] = null;
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: "流程已重置，請輸入「我是保險經紀人」重新開始。",
+  });
 }
 
+app.get("/", (req, res) => {
+  res.status(200).send("OK");
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+   app.listen(PORT, () => {
+     console.log(`Server running on port ${PORT}`);
 });
