@@ -9,6 +9,7 @@ import { calcIRR } from "./services/irr_calculator.js";
 import { analyzeGap } from "./services/gap_analyzer.js";
 import { buildSalesScript } from "./services/sales_script.js";
 import { saveUserProfile } from "./services/db.js";
+import { getSmartReply } from "./services/conversationService.js";
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -245,17 +246,9 @@ async function handleEvent(event) {
 
   // 流程意外狀況：重置
   userState[userId] = null;
-  return client.replyMessage(event.replyToken, {
-    type: "text",
-    text: "流程已重置，請輸入「我是保險經紀人」重新開始。",
-  });
+  
+  // AI fallback
+  const aiReply = await getSmartReply(userId, text);
+  return client.replyMessage(event.replyToken, { type: "text", text: aiReply });
+
 }
-
-app.get("/", (req, res) => {
-  res.status(200).send("OK");
-});
-
-const PORT = process.env.PORT || 3000;
-   app.listen(PORT, () => {
-     console.log(`Server running on port ${PORT}`);
-});
