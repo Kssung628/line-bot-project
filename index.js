@@ -16,7 +16,31 @@ const config = {
 };
 
 const app = express();
+// ❌ 錯誤：這會導致 body 被解析為物件
+// app.use(express.json());
+
+// ✅ 正確：LINE middleware 需要原始 body
+app.post("/callback", 
+  express.raw({ type: 'application/json' }),  // 保留原始 body
+  line.middleware(config), 
+  async (req, res) => {
+    try {
+      await Promise.all(req.body.events.map(handleEvent));
+      return res.json({ status: "ok" });
+    } catch (e) {
+      console.error("handleEvent error:", e);
+      return res.status(500).end();
+    }
+  }
+);
+
+// 其他路由可以使用 JSON parser
 app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.status(200).send("OK");
+});
+
 
 const client = new line.Client(config);
 
