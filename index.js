@@ -17,13 +17,18 @@ const config = {
 };
 
 const app = express();
-// ❌ 錯誤：這會導致 body 被解析為物件
+
+// ❗千萬不能在 callback 前使用 json parser
 // app.use(express.json());
 
-// ✅ 正確：LINE middleware 需要原始 body
-app.post("/callback", 
-  express.raw({ type: 'application/json' }),  // 保留原始 body
-  line.middleware(config), 
+// Webhook — 必須保留 raw body
+app.post(
+  "/callback",
+  express.raw({ type: "application/json" }),   // ① 保留 raw
+  line.middleware({
+    channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+    channelSecret: process.env.LINE_CHANNEL_SECRET
+  }),                                         // ② LINE 驗簽
   async (req, res) => {
     try {
       await Promise.all(req.body.events.map(handleEvent));
@@ -35,11 +40,10 @@ app.post("/callback",
   }
 );
 
-// 其他路由可以使用 JSON parser
+// 其他 API 可以使用 JSON parser
 app.use(express.json());
 
-app.get("/", (req, res) => {
-  res.status(200).send("OK");
+app.get("/", (req, res) => res.status(200).send("OK"));
 });
 
 
